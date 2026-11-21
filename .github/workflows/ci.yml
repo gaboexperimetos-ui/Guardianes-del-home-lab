@@ -4,12 +4,21 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Check scripts are executable
         run: |
-          for f in *.sh; do
+          status=0
+          for f in scripts/*; do
             if [[ ! -x "$f" ]]; then
               echo "ERROR: $f is not executable"
-              exit 1
+              status=1
             fi
           done
+          exit $status
+      - name: Syntax check (bash)
+        run: |
+          status=0
+          for f in scripts/*; do
+            bash -n "$f" || { echo "ERROR: syntax error in $f"; status=1; }
+          done
+          exit $status

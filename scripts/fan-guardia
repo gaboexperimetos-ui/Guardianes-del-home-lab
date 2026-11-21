@@ -1,0 +1,84 @@
+#!/bin/bash
+# fan-guardia — salvaguarda térmica de ventiladores ASUS TUF
+# Vigila CPU/GPU con un bucle. Si se calientan demasiado mientras el nivel de
+# fans es bajo (tu elección), fuerza temporalmente el MÁXIMO (nivel 5) SIN tocar
+# tu nivel preferido guardado, y lo restaura cuando la temperatura refresca.
+# No actúa en modo automático (0): ahí el EC de ASUS ya se autorregula.
+# Umbrales configurables por entorno para pruebas: FAN_CPU_ALTA / FAN_GPU_ALTA.
+set -u
+
+CPU_ALTA="${FAN_CPU_ALTA:-90}"
+GPU_ALTA="${FAN_GPU_ALTA:-85}"
+INTERVALO="${FAN_INTERVALO:-10}"
+FAN_NIVEL="$HOME/.local/bin/fan-nivel"
+ESTADO="$HOME/.config/fan-nivel/estado"
+
+emergencia=0
+recupera=0
+
+temp_cpu() {
+    local t h name
+    for h in /sys/class/hwmon/hwmon*; do
+        name=$(cat "$h/name" 2>/dev/null) || continue
+        case "$name" in k10temp|zenpower)
+            t=$(cat "$h/temp1_input" 2>/dev/null) || continue
+            if [ -n "$t" ] && [ "$t" -gt 0 ] 2>/dev/null; then echo $((t / 1000)); return; fi
+            ;;
+        esac
+    done
+    echo 0
+}
+
+temp_gpu() {
+    local t h name
+    # NVIDIA dGPU primero
+    t=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+    if [ -n "$t" ] && [ "$t" -gt 0 ] 2>/dev/null; then echo "$t"; return; fi
+    # iGPU AMD (amdgpu)
+    for h in /sys/class/hwmon/hwmon*; do
+        name=$(cat "$h/name" 2>/dev/null) || continue
+        if [ "$name" = "amdgpu" ]; then
+            t=$(cat "$h/temp1_input" 2>/dev/null) || continue
+            if [ -n "$t" ] && [ "$t" -gt 0 ] 2>/dev/null; then echo $((t / 1000)); return; fi
+        fi
+    done
+    echo 0
+}
+
+echo "🌀 fan-guardia activo (fuerza máximo si CPU>${CPU_ALTA}°C o GPU>${GPU_ALTA}°C)"
+
+while true; do
+    cpu=$(temp_cpu); gpu=$(temp_gpu)
+    preferido=$(cat "$ESTADO" 2>/dev/null || echo 5)
+
+    if [ "$cpu" -ge "$CPU_ALTA" ] || [ "$gpu" -ge "$GPU_ALTA" ]; then
+        # 🔥 Caliente: si no estás en modo automático, forzar máximo temporal
+        if [ "$preferido" != "0" ]; then
+            if [ "$emergencia" = "0" ]; then
+                emergencia=1; recupera=0
+                notify-send -u critical -a fan-guardia \
+                    "🔥 Temp alta (CPU ${cpu}°C / GPU ${gpu}°C)" \
+                    "Ventiladores al máximo temporalmente" 2>/dev/null
+                echo "🔥 EMERGENCIA CPU=${cpu} GPU=${gpu} -> fans máximo (preferido=$preferido)"
+            fi
+            FAN_NO_GUARDAR=1 "$FAN_NIVEL" 5 >/dev/null 2>&1
+        fi
+    elif [ "$emergencia" = "1" ]; then
+        # 🧊 Refrescado: esperar 2 ciclos (histéresis) y restaurar nivel preferido
+        recupera=$((recupera + 1))
+        if [ "$recupera" -ge 2 ]; then
+            emergencia=0; recupera=0
+            if [ "$preferido" = "0" ]; then
+                "$FAN_NIVEL" 0 >/dev/null 2>&1
+            else
+                "$FAN_NIVEL" "$preferido" >/dev/null 2>&1
+            fi
+            notify-send -a fan-guardia \
+                "✅ Temp normal (CPU ${cpu}°C / GPU ${gpu}°C)" \
+                "Restaurado tu nivel preferido (Super+$preferido)" 2>/dev/null
+            echo "✅ RESTAURADO preferido=$preferido"
+        fi
+    fi
+
+    sleep "$INTERVALO"
+done

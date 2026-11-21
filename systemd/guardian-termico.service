@@ -1,0 +1,15 @@
+[Unit]
+Description=Guardian termico: limita los relojes de la dGPU por temperatura
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/home/gabo/.local/bin/guardian-termico
+Restart=always
+RestartSec=5
+# El bucle es trivial: no necesita CPU ni prioridad
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target

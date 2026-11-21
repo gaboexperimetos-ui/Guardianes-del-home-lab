@@ -1,0 +1,40 @@
+#!/bin/bash
+# ============================================================================
+# guardian-llm — descarga el modelo local cuando nadie lo usa
+#
+#   llama.cpp en modo router deja el proceso hijo cargado indefinidamente y,
+#   con esta build, ese hijo se queda girando a 1 core al 100 % aunque no
+#   llegue ninguna peticion (bug comprobado: 2h12m de CPU sin clientes).
+#
+#   Este guardian mira las peticiones de los ultimos 3 minutos. Si no hay
+#   ninguna y el hijo sigue quemando CPU, lo cierra: el router reinicia solo,
+#   sin modelo en VRAM y sin el core girando. La siguiente peticion lo
+#   recarga (~3 s).
+#
+#   Parar:  systemctl --user stop guardian-llm
+# ============================================================================
+set -u
+
+PATRON='llama-server --host 127.0.0.1 --jinja'
+UMBRAL_CPU=60      # % de un core
+VENTANA="3min"
+
+while true; do
+    sleep 30
+    hijo=$(pgrep -f "$PATRON" | head -1)
+    [ -z "$hijo" ] && continue
+
+    cpu=$(ps -o pcpu= -p "$hijo" 2>/dev/null | tr -d ' ')
+    [ -z "$cpu" ] && continue
+    cpu_ent=${cpu%%.*}
+
+    peticiones=$(journalctl --user -u llama-router.service --since "-$VENTANA" --no-pager 2>/dev/null \
+                 | grep -c "launch_slot_")
+
+    if [ "$peticiones" -eq 0 ] && [ "${cpu_ent:-0}" -ge "$UMBRAL_CPU" ]; then
+        kill -TERM "$hijo" 2>/dev/null
+        sleep 3
+        kill -KILL "$hijo" 2>/dev/null
+        logger -t guardian-llm "modelo descargado: 0 peticiones en $VENTANA, hijo al ${cpu}%"
+    fi
+done

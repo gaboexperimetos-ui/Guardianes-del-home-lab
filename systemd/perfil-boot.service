@@ -1,0 +1,13 @@
+[Unit]
+Description=Restaura el perfil de energia guardado al iniciar sesion
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -lc 'p=$(cat "$HOME/.config/perfil/actual" 2>/dev/null); [ -n "$p" ] && exec "$HOME/.local/bin/perfil" "$p"'
+TimeoutStartSec=30
+
+[Install]
+WantedBy=default.target

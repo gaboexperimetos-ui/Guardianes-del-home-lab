@@ -1,0 +1,55 @@
+#!/bin/bash
+# 💨 fan-nivel — control de ventiladores ASUS por teclas
+#    Super+0 = curva del sistema (EC automático)
+#    Super+1..5 = niveles fijos (1=min … 5=max, 7000/7800 RPM)
+#    El nivel 5 usa control directo del EC (asus-fan-control-ec set 255) para máximo real.
+#    Los niveles 0-4 devuelven el control al EC antes de aplicar la curva,
+#    para que no se queden pegados al máximo tras usar el nivel 5.
+set -u
+
+LVL="${1:-0}"
+case "$LVL" in
+  0|a|auto) P="auto" ;;
+  1) P=0   ;;
+  2) P=85  ;;
+  3) P=140 ;;
+  4) P=200 ;;
+  5) P=255 ;;
+  *) echo "uso: fan-nivel 0|1|2|3|4|5"; exit 1 ;;
+esac
+
+mkdir -p "$HOME/.config/fan-nivel"
+GUARDADO="$LVL"; [ "$P" = "auto" ] && GUARDADO=0
+echo "$GUARDADO" > "$HOME/.config/fan-nivel/estado"
+
+if [ "$P" = "auto" ]; then
+    sudo -n asus-fan-control-ec set -1 >/dev/null 2>&1
+    asusctl fan-curve --enable-fan-curves false >/dev/null 2>&1
+    notify-send -a "Ventiladores" "🌀 Automático" "El sistema decide según temperatura" 2>/dev/null
+    echo "🌀 fan-nivel auto: EC automático (control devuelto al sistema)"
+    exit 0
+fi
+
+# Nivel 5: control directo del EC (máximo real, ignora temperatura)
+if [ "$LVL" = "5" ]; then
+    sudo -n asus-fan-control-ec set 255 >/dev/null 2>&1 || asus-fan-control-ec set 255 >/dev/null 2>&1
+    notify-send -a "Ventiladores" "💨 Nivel 5" "Máximo real (EC 255/255)" 2>/dev/null
+    echo "💨 Fan nivel 5 aplicado (EC directo 255/255 = máximo)"
+    exit 0
+fi
+
+# Niveles 1-4: devolver el control al EC y aplicar curva plana vía asusctl
+sudo -n asus-fan-control-ec set -1 >/dev/null 2>&1
+ASUS_PERFIL=$(asusctl profile get 2>/dev/null | sed -n 's/^Active profile: *//p')
+case "$ASUS_PERFIL" in
+    Quiet)     MP=Quiet ;;
+    Balanced)  MP=Balanced ;;
+    *)         MP=Performance ;;
+esac
+asusctl fan-curve --enable-fan-curves false >/dev/null 2>&1
+PARES="30c:${P},40c:${P},50c:${P},60c:${P},70c:${P},80c:${P},90c:${P},100c:${P}"
+asusctl fan-curve --mod-profile "$MP" --fan CPU --data "${PARES}" >/dev/null 2>&1
+asusctl fan-curve --mod-profile "$MP" --fan GPU --data "${PARES}" >/dev/null 2>&1
+asusctl fan-curve --enable-fan-curves true >/dev/null 2>&1
+notify-send -a "Ventiladores" "💨 Nivel $LVL" "PWM $P/255" 2>/dev/null
+echo "💨 Fan nivel $LVL aplicado (PWM $P/255)"

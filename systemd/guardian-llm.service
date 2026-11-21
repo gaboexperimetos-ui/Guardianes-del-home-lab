@@ -1,0 +1,14 @@
+[Unit]
+Description=Descarga el modelo local de llama.cpp cuando esta ocioso
+After=llama-router.service
+
+[Service]
+Type=simple
+ExecStart=/home/gabo/.local/bin/guardian-llm
+Restart=always
+RestartSec=10
+Nice=19
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target

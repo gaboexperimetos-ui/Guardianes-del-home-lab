@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# gpu-fix: si la GPU se queda clavada a 810 MHz de memoria (decode lento, ~3 tok/s),
+# resetea los relojes con `nvidia-smi -rgc`. No reinicia nvidia-powerd.
+set -u
+
+mem=$(nvidia-smi --query-gpu=clocks.mem --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+echo "memoria actual: ${mem:-?} MHz, uso GPU: ${util:-?}% (normal bajo carga: 6001-7001, anclada: 810)"
+
+# OJO: en reposo la memoria baja a ~405 MHz y eso NO es el fallo.
+# El anclaje real solo se detecta CON carga (util >= 60%).
+if [ "${mem:-0}" -le 1000 ] && [ "${util:-0}" -ge 60 ]; then
+    echo "Reseteando relojes de la GPU (nvidia-smi -rgc)..."
+    sudo -n nvidia-smi -rgc >/dev/null 2>&1 || {
+        echo "Necesito sudo sin contraseña para 'nvidia-smi -rgc'"; exit 1; }
+    sleep 3
+    echo "memoria ahora: $(nvidia-smi --query-gpu=clocks.mem --format=csv,noheader,nounits 2>/dev/null | tr -d ' ') MHz"
+else
+    echo "La GPU está en rango, no hay que tocar nada."
+fi

@@ -1,0 +1,32 @@
+#!/bin/bash
+# ============================================================================
+# guardian-fondo — pausa el fondo animado cuando hay algo a pantalla completa
+#
+#   El wallpaper es un GIF animado (blackwall.gif): awww-daemon gastaba
+#   ~4.8 % de CPU constante (13m31s en 4h40m) mas la decodificacion en GPU.
+#   Con un juego o video a pantalla completa ese trabajo no se ve, asi que
+#   se pausa y se reanuda al salir.
+#
+#   Parar:  systemctl --user stop guardian-fondo
+# ============================================================================
+set -u
+
+estado=""
+while true; do
+    fs=$(hyprctl activewindow -j 2>/dev/null \
+         | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("fullscreen",0))
+except Exception: print(0)' 2>/dev/null)
+    fs=${fs:-0}
+
+    if [ "$fs" -ge 1 ] 2>/dev/null; then
+        if [ "$estado" != "pausado" ]; then
+            awww pause  >/dev/null 2>&1; estado="pausado"
+        fi
+    else
+        if [ "$estado" != "activo" ]; then
+            awww unpause >/dev/null 2>&1; estado="activo"
+        fi
+    fi
+    sleep 5
+done

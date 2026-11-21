@@ -1,0 +1,63 @@
+#!/bin/bash
+# ============================================================================
+# perfil-root — parte privilegiada de los perfiles de energía
+# Lo llama `perfil` por sudo/pkexec. No usar a mano salvo depuración.
+#   uso: sudo perfil-root rendimiento|medio|bateria
+# ============================================================================
+set -u
+
+MODO="${1:-}"
+A=/sys/class/firmware-attributes/asus-armoury/attributes
+DGPU=/sys/bus/pci/devices/0000:01:00.0/power/control
+
+case "$MODO" in
+    rendimiento) PPT=60; PLATFORM=performance;       EPP=performance;         CURVE=Performance ;;
+    medio)       PPT=55; PLATFORM=balanced;          EPP=balance_performance; CURVE=Balanced    ;;
+    bateria)     PPT=35; PLATFORM=low-power;         EPP=power;               CURVE=Quiet       ;;
+    *) echo "uso: perfil-root rendimiento|medio|bateria" >&2; exit 2 ;;
+esac
+
+# --- GPU discreta: híbrida en todos los perfiles salvo batería -------------
+case "$MODO" in
+    bateria)    supergfxctl -m Integrated >/dev/null 2>&1 ;;
+    rendimiento) supergfxctl -m Hybrid     >/dev/null 2>&1 ;;
+    medio)      supergfxctl -m Hybrid     >/dev/null 2>&1 ;;
+esac
+
+# --- Límite de potencia del APU (PPT) --------------------------------------
+for attr in ppt_pl1_spl ppt_pl2_sppt ppt_pl3_fppt; do
+    [ -w "$A/$attr/current_value" ] && echo "$PPT" > "$A/$attr/current_value" 2>/dev/null
+done
+
+# --- Perfil de plataforma ACPI (lo usan los governors y los ventiladores) ---
+[ -w /sys/firmware/acpi/platform_profile ] && echo "$PLATFORM" > /sys/firmware/acpi/platform_profile 2>/dev/null
+
+# --- Governor PRIMERO: con governor=performance el kernel bloquea el EPP ----
+for f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+    case "$MODO" in
+        rendimiento) echo performance > "$f" 2>/dev/null ;;
+        *)           echo powersave   > "$f" 2>/dev/null ;;
+    esac
+done
+
+# --- EPP de la CPU (amd-pstate-epp) ---------------------------------------
+for f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/energy_performance_preference; do
+    echo "$EPP" > "$f" 2>/dev/null
+done
+# Boost siempre disponible (el EPP ya decide cuánto se usa)
+[ -w /sys/devices/system/cpu/cpufreq/boost ] && echo 1 > /sys/devices/system/cpu/cpufreq/boost 2>/dev/null
+
+# --- Curva de ventiladores del perfil ASUS --------------------------------
+asusctl fan-curve --mod-profile "$CURVE" --enable-fan-curves true >/dev/null 2>&1
+
+# --- dGPU: la 3060 duerme cuando nadie la usa (VRAM al mínimo) -------------
+#   rendimiento -> auto : D3cold en reposo, se despierta sola al usarla
+#   medio       -> on   : siempre lista para juegos/IA
+#   bateria     -> la apaga supergfxctl
+case "$MODO" in
+    rendimiento) echo auto > "$DGPU" 2>/dev/null ;;
+    medio)       echo on   > "$DGPU" 2>/dev/null ;;
+    bateria)     echo auto > "$DGPU" 2>/dev/null ;;
+esac
+
+echo "perfil=$MODO PPT=${PPT}W platform=$PLATFORM EPP=$EPP curva=$CURVE"

@@ -1,0 +1,12 @@
+[Unit]
+Description=ASUS TUF salvaguarda térmica de ventiladores
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/home/gabo/.local/bin/fan-guardia
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,66 @@
+#!/bin/bash
+# ============================================================================
+# guardian-termico — limita el reloj de la dGPU según la temperatura de la GPU
+#   La 3060 comparte heatpipes con el Ryzen. Se vigila SOLO la temperatura de
+#   la GPU: el Tctl del CPU ya no capa la gráfica (ese era el fallo de 800 MHz).
+#
+#   Escalones:
+#     >= 94 C -> 800 MHz
+#     >= 91 C -> 1100 MHz
+#     >= 88 C -> 1400 MHz
+#     >= 85 C -> 1600 MHz
+#     >= 82 C -> 1800 MHz
+#     <= 78 C -> sin límite (relojes automáticos)
+#     entre 78 y 82 C -> mantiene el último escalón (histéresis)
+#
+#   Usa `sudo -n nvidia-smi`, que ya está autorizado sin contraseña.
+#   Parar:  systemctl --user stop guardian-termico
+# ============================================================================
+set -u
+
+sensor_tctl() {
+    local h
+    for h in /sys/class/hwmon/hwmon*; do
+        [ "$(cat "$h/name" 2>/dev/null)" = "k10temp" ] && { echo "$h/temp1_input"; return; }
+    done
+    echo ""
+}
+
+leer_gpu() {
+    local t
+    t=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+    t=${t%%.*}
+    [ -n "${t:-}" ] && echo "$t" || echo ""
+}
+
+estado="init"
+while true; do
+    gpu=$(leer_gpu)
+
+    # dGPU apagada por el MUX o driver sin respuesta: no tocar nada
+    case "$gpu" in
+        ''|*[!0-9]*) sleep 5; continue ;;
+    esac
+
+    nuevo=""
+    if   [ "$gpu" -ge 94 ]; then nuevo=800
+    elif [ "$gpu" -ge 91 ]; then nuevo=1100
+    elif [ "$gpu" -ge 88 ]; then nuevo=1400
+    elif [ "$gpu" -ge 85 ]; then nuevo=1600
+    elif [ "$gpu" -ge 82 ]; then nuevo=1800
+    elif [ "$gpu" -le 78 ]; then nuevo=auto
+    fi
+
+    if [ -n "$nuevo" ] && [ "$nuevo" != "$estado" ]; then
+        if [ "$nuevo" = "auto" ]; then
+            sudo -n nvidia-smi -rgc >/dev/null 2>&1
+        else
+            # Rango: mínimo 210 MHz (reposo) y máximo el escalón térmico.
+            sudo -n nvidia-smi -lgc "210,$nuevo" >/dev/null 2>&1
+        fi
+        estado="$nuevo"
+        tctl=$(( $(cat "$(sensor_tctl)" 2>/dev/null || echo 0) / 1000 ))
+        echo "gpu=${gpu}C tctl=${tctl}C -> $nuevo"
+    fi
+    sleep 5
+done

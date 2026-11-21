@@ -1,0 +1,75 @@
+#!/bin/bash
+
+LOG=/tmp/opencode/guardian-cpu.log
+STATE=/tmp/opencode/guardian-cpu.state
+PERFIL_ACTUAL=/home/gabo/.config/perfil/actual
+APLICAR=/usr/local/bin/aplicar-perfil
+CURVA="30c:100,40c:150,50c:200,55c:230,60c:255,65c:255,70c:255,75c:255"
+
+# Sensor por nombre (el número de hwmon puede cambiar tras un reinicio o
+# actualización de kernel; k10temp es el que da Tctl).
+TCTL=/sys/class/hwmon/hwmon5/temp1_input
+for h in /sys/class/hwmon/hwmon*; do
+    if [ "$(cat "$h/name" 2>/dev/null)" = "k10temp" ]; then
+        TCTL="$h/temp1_input"
+        break
+    fi
+done
+
+mkdir -p /tmp/opencode
+echo "started $(date)" > "$LOG"
+echo "normal" > "$STATE"
+
+tctl_actual() { echo $(( $(cat "$TCTL" 2>/dev/null || echo 0) / 1000 )); }
+
+limitar() {
+    if [ "$(cat "$STATE")" != "limitado" ]; then
+        /usr/bin/asusctl fan-curve --mod-profile Performance --data "$CURVA" >> "$LOG" 2>&1
+    fi
+    /usr/bin/sudo -n "$APLICAR" limite 45 >> "$LOG" 2>&1
+    ppt=$(cat /sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/current_value)
+    echo "$(date +%H:%M:%S) Tctl=$(tctl_actual)C -> limite 45W/performance ppt=$ppt" >> "$LOG"
+    echo "limitado" > "$STATE"
+}
+
+restaurar() {
+    # Deshace la curva agresiva que inyectamos en el perfil Performance y
+    # devuelve el perfil real (medio usa Balanced, rendimiento Performance).
+    /usr/bin/asusctl fan-curve --mod-profile Performance --default >> "$LOG" 2>&1
+    /usr/bin/sudo -n "$APLICAR" "$1" >> "$LOG" 2>&1
+    ppt=$(cat /sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/current_value)
+    echo "$(date +%H:%M:%S) Tctl=$(tctl_actual)C -> restaurado $1 ppt=$ppt" >> "$LOG"
+    echo "normal" > "$STATE"
+}
+
+while true; do
+    sleep 3
+    tctl=$(tctl_actual)
+    estado=$(cat "$STATE")
+    perfil=$(cat "$PERFIL_ACTUAL" 2>/dev/null || echo rendimiento)
+
+    if [ "$tctl" -ge 82 ]; then
+        # batería ya va a 35 W: no hace falta limitar más
+        case "$perfil" in
+            bateria) ;;
+            *)
+                # Reaplicar si el PPT volvió a subir (p. ej. perfil-boot lo puso a 60)
+                ppt=$(cat /sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/current_value 2>/dev/null || echo 0)
+                if [ "$estado" != "limitado" ] || [ "${ppt:-0}" -gt 45 ]; then
+                    limitar
+                fi
+                ;;
+        esac
+    elif [ "$tctl" -le 65 ]; then
+        if [ "$estado" = "limitado" ]; then
+            restaurar "$perfil"
+        fi
+    else
+        if [ "$estado" = "limitado" ]; then
+            case "$perfil" in
+                bateria) ;;
+                *) /usr/bin/sudo -n "$APLICAR" limite 45 >> "$LOG" 2>&1 ;;
+            esac
+        fi
+    fi
+done

@@ -1,0 +1,12 @@
+[Unit]
+Description=Limita la potencia del CPU cuando supera 75 C (evita 95 C bajo carga)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/home/gabo/.local/bin/guardian-cpu
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

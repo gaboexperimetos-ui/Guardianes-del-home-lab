@@ -1,0 +1,131 @@
+#!/bin/bash
+# ============================================================================
+# perfil — selector único de perfiles de energía y MUX
+#   uso:  perfil bateria | equilibrio | rendimiento | menu | estado
+#   Sin argumento abre el menú de noctalia.
+#
+#   bateria     : MUX Integrated  -> CPU + iGPU, 3060 apagada
+#   equilibrio  : MUX AsusMuxDgpu -> CPU + 3060 (sin iGPU), todo pinta en la 3060
+#   rendimiento : MUX Hybrid      -> ambas GPUs: iGPU para el sistema y la 3060
+#                                    para juegos/IA/navegador (zen-dgpu)
+#
+#   El MUX se aplica en el siguiente reinicio (se avisa al terminar).
+# ============================================================================
+set -u
+
+ROOT=/usr/local/bin/perfil-root
+ESTADO="$HOME/.config/perfil/actual"
+
+sensor_tctl() {
+    local h
+    for h in /sys/class/hwmon/hwmon*; do
+        [ "$(cat "$h/name" 2>/dev/null)" = "k10temp" ] && { echo "$h/temp1_input"; return; }
+    done
+    echo /sys/class/hwmon/hwmon5/temp1_input
+}
+
+notificar() {
+    command -v notify-send >/dev/null && timeout 3 notify-send -a "Perfil" "$1" "$2" 2>/dev/null
+}
+
+aplicar_cpu() {
+    # Vía asusd (DBus): NO necesita contraseña y cambia a la vez
+    # platform_profile + governor + EPP. Comprobado en este equipo.
+    case "$1" in
+        rendimiento) asusctl profile set Performance >/dev/null 2>&1 ;;
+        medio)       asusctl profile set Balanced    >/dev/null 2>&1 ;;
+        bateria)     asusctl profile set Quiet       >/dev/null 2>&1 ;;
+    esac
+}
+
+aplicar_root() {
+    # PPT, EPP fino, curva de ventiladores y MUX (supergfxctl)
+    [ -x "$ROOT" ] || return 127
+    sudo -n "$ROOT" "$1" >/dev/null 2>&1 && return 0
+    return 1
+}
+
+cambiar_llm() {
+    case "$1" in
+        bateria)
+            systemctl --user stop llama-router.service 2>/dev/null
+            systemctl --user start llama-router-cpu.service 2>/dev/null
+            ;;
+        *)
+            systemctl --user stop llama-router-cpu.service 2>/dev/null
+            systemctl --user start llama-router.service 2>/dev/null
+            ;;
+    esac
+}
+
+aplicar_gpu() {
+    # Sin topes de reloj por perfil: el guardián térmico decide según la GPU.
+    case "$1" in
+        rendimiento|medio) sudo -n nvidia-smi -rgc >/dev/null 2>&1 ;;
+    esac
+}
+
+modo="${1:-menu}"
+
+if [ "$modo" = "menu" ]; then
+    eleccion=$(printf '🔋  Batería\n⚖  Equilibrio\n⚡  Rendimiento\n' | noctalia dmenu -p "Perfil de energía")
+    case "$eleccion" in
+        *Bater*)       modo=bateria ;;
+        *Equilibrio*)  modo=medio ;;
+        *Rendimiento*) modo=rendimiento ;;
+        *) exit 0 ;;
+    esac
+fi
+
+# Alias de nombre: equilibrio = medio, máximo = rendimiento
+case "$modo" in
+    equilibrio)    modo=medio ;;
+    maximo|máximo) modo=rendimiento ;;
+esac
+
+case "$modo" in
+    rendimiento|medio|bateria) ;;
+    estado) ;;
+    *) echo "uso: perfil bateria|equilibrio|rendimiento|menu|estado" >&2; exit 2 ;;
+esac
+
+if [ "$modo" = "estado" ]; then
+    p=$(cat "$ESTADO" 2>/dev/null || echo '?')
+    [ "$p" = "medio" ] && p="medio (equilibrio)"
+    printf 'perfil guardado : %s\n' "$p"
+    printf 'MUX configurado : %s (se aplica al reiniciar)\n' "$(supergfxctl -g 2>/dev/null)"
+    printf 'platform_profile: %s\n' "$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)"
+    printf 'EPP             : %s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null)"
+    printf 'governor        : %s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)"
+    printf 'dGPU runtime    : %s (%s)\n' "$(cat /sys/bus/pci/devices/0000:01:00.0/power/runtime_status 2>/dev/null)" "$(cat /sys/bus/pci/devices/0000:01:00.0/power/control 2>/dev/null)"
+    printf 'Tctl            : %s C\n' "$(( $(cat "$(sensor_tctl)" 2>/dev/null || echo 0)/1000 ))"
+    exit 0
+fi
+
+mux_antes=$(supergfxctl -g 2>/dev/null)
+aplicar_cpu "$modo"
+aplicar_root "$modo" || true
+aplicar_gpu "$modo"
+cambiar_llm "$modo"
+mkdir -p "$(dirname "$ESTADO")" && echo "$modo" > "$ESTADO"
+
+# supergfxctl -g devuelve el modo CONFIGURADO (el que se aplicará al arrancar)
+mux_despues=$(supergfxctl -g 2>/dev/null)
+if [ -n "$mux_despues" ] && [ "$mux_antes" != "$mux_despues" ]; then
+    notificar "🔁 Reinicia para aplicar el MUX" "Nuevo modo: $mux_despues"
+    echo "MUX cambiado a $mux_despues (se aplica al reiniciar)"
+else
+    echo "MUX configurado: $mux_despues"
+fi
+
+case "$modo" in
+    rendimiento) notificar "⚡ Rendimiento" "Ambas GPUs: iGPU sistema · 3060 juegos/IA · zen-dgpu" ;;
+    medio)       notificar "⚖ Equilibrio" "3060 sola (sin iGPU) · todo en la dGPU" ;;
+    bateria)     notificar "🔋 Batería" "iGPU + CPU · 3060 apagada" ;;
+esac
+case "$modo" in
+    medio) echo "perfil aplicado: equilibrio (medio)" ;;
+    *)     echo "perfil aplicado: $modo" ;;
+esac
+echo "  MUX configurado=$(supergfxctl -g 2>/dev/null)"
+echo "  CPU: $(cat /sys/firmware/acpi/platform_profile) / $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor) / $(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference)"
